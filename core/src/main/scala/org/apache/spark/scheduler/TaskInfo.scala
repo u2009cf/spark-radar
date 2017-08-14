@@ -57,6 +57,22 @@ class TaskInfo(
   val accumulables = ListBuffer[AccumulableInfo]()
 
   /**
+   * We record the original task size when task is created and update task size in progress.
+   * We can estimate the progress ratio to avoid redundant speculation.
+   * Added by chenfei
+   */
+  var taskSizeOriginal = -1L
+
+  var taskSizeInProgress = 0L
+
+  var throughput = 0.0
+
+  private[spark] def getProgressRatio(): Double = {
+    if (taskSizeOriginal < 0) return 1.0
+    1.0 * taskSizeInProgress / taskSizeOriginal
+  }
+
+  /**
    * The time when the task has completed successfully (including the time to remotely fetch
    * results, if necessary).
    */
@@ -72,7 +88,9 @@ class TaskInfo(
 
   private[spark] def markFinished(state: TaskState, time: Long = System.currentTimeMillis) {
     finishTime = time
-    if (state == TaskState.FAILED) {
+    if (state == TaskState.FINISHED) {
+      throughput = 1000.0 * taskSizeOriginal / duration
+    } else if (state == TaskState.FAILED) {
       failed = true
     } else if (state == TaskState.KILLED) {
       killed = true

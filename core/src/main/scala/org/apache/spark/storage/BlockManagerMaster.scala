@@ -90,6 +90,15 @@ class BlockManagerMaster(
   }
 
   /**
+   * Get block size of multiple blockIds from the driver
+   * Added by chenfei
+   */
+  def getSizes(blockIds: Array[BlockId]): IndexedSeq[Long] = {
+    driverEndpoint.askWithRetry[IndexedSeq[Long]](
+      GetSizesMultipleBlockIds(blockIds))
+  }
+
+  /**
    * Check if block manager master has a block. Note that this can be used to check for only
    * those blocks that are reported to block manager master.
    */

@@ -290,6 +290,17 @@ class NewHadoopRDD[K, V](
     locs.getOrElse(split.getLocations.filter(_ != "localhost"))
   }
 
+  /**
+   * Used to get partition size
+   * We will use this value as a metric of evaluating tasks' load
+   * Added by chenfei
+   */
+  override def getPartitionSize(hSplit: Partition): Long = {
+    val split = hSplit.asInstanceOf[NewHadoopPartition].serializableHadoopSplit.value
+    val length = split.getLength()
+    length
+  }
+
   override def persist(storageLevel: StorageLevel): this.type = {
     if (storageLevel.deserialized) {
       logWarning("Caching NewHadoopRDDs as deserialized objects usually leads to undesired" +

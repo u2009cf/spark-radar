@@ -90,6 +90,10 @@ private[spark] object BlockManagerMessages {
 
   case class GetLocationsMultipleBlockIds(blockIds: Array[BlockId]) extends ToBlockManagerMaster
 
+  // This message is send to BlockManagerMaster to get blocks' size
+  // Added by chenfei
+  case class GetSizesMultipleBlockIds(blockIds: Array[BlockId]) extends ToBlockManagerMaster
+
   case class GetPeers(blockManagerId: BlockManagerId) extends ToBlockManagerMaster
 
   case class GetExecutorEndpointRef(executorId: String) extends ToBlockManagerMaster

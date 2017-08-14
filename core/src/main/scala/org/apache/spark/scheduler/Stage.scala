@@ -63,6 +63,11 @@ private[scheduler] abstract class Stage(
     val callSite: CallSite)
   extends Logging {
 
+  /** Identify whether this stage is a shuffleMap stage.
+   * Added by chenfei
+   */
+  var isShuffleMap = false
+
   val numPartitions = rdd.partitions.length
 
   /** Set of jobs that this stage belongs to. */

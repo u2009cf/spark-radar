@@ -28,6 +28,7 @@ import scala.util.Random
 
 import org.apache.spark._
 import org.apache.spark.TaskState.TaskState
+import org.apache.spark.executor.TaskMetrics
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config
 import org.apache.spark.scheduler.SchedulingMode.SchedulingMode
@@ -96,6 +97,14 @@ private[spark] class TaskSchedulerImpl(
   // IDs of the tasks running on each executor
   private val executorIdToRunningTaskIds = new HashMap[String, HashSet[Long]]
 
+  // A map of executorId to the order(decreasing) in executors' list
+  // Added by chenfei
+  private var executorIdOrder = new HashMap[String, Int]
+
+  private var executorIdToCapability = new HashMap[String, Double]
+
+  private var executorIdSpeculatableTask = new HashMap[String, Int]
+
   def runningTasksByExecutors: Map[String, Int] = synchronized {
     executorIdToRunningTaskIds.toMap.mapValues(_.size)
   }
@@ -105,6 +114,10 @@ private[spark] class TaskSchedulerImpl(
   protected val hostToExecutors = new HashMap[String, HashSet[String]]
 
   protected val hostsByRack = new HashMap[String, HashSet[String]]
+
+  // A map from host to rack in order to avoid function call getRackForHost
+  // Added by chenfei
+  protected val hostToRack = new HashMap[String, String]
 
   protected val executorIdToHost = new HashMap[String, String]
 
@@ -238,6 +251,13 @@ private[spark] class TaskSchedulerImpl(
    * cleaned up.
    */
   def taskSetFinished(manager: TaskSetManager): Unit = synchronized {
+    if (manager.executorIdToCapability != null) {
+      executorIdToCapability = manager.executorIdToCapability.clone()
+      executorIdOrder = manager.sortByExecutorCapability().clone()
+    }
+    if (manager.executorIdWithSpeculatableTask != null) {
+      executorIdSpeculatableTask = manager.executorIdWithSpeculatableTask.clone()
+    }
     taskSetsByStageIdAndAttempt.get(manager.taskSet.stageId).foreach { taskSetsForStage =>
       taskSetsForStage -= manager.taskSet.stageAttemptId
       if (taskSetsForStage.isEmpty) {
@@ -284,6 +304,21 @@ private[spark] class TaskSchedulerImpl(
   }
 
   /**
+   * Sort offers according to executors' capability
+   * Added by chenfei
+   */
+  def sortWorkerOffers(offers: IndexedSeq[WorkerOffer]): IndexedSeq[WorkerOffer] = {
+    val workerOfferToExecutorCapa = new HashMap[WorkerOffer, Double]
+    for (i <- 0 until offers.length) {
+      workerOfferToExecutorCapa.put(offers(i),
+        executorIdToCapability.getOrElse(offers(i).executorId, 0))
+    }
+    workerOfferToExecutorCapa.toList.sortBy( _._2).map{
+      case (a, b) => a
+    }.reverse.toIndexedSeq
+  }
+
+  /**
    * Called by cluster manager to offer resources on slaves. We respond by asking our active task
    * sets for tasks in order of priority. We fill each node with tasks in a round-robin manner so
    * that tasks are balanced across the cluster.
@@ -303,13 +338,14 @@ private[spark] class TaskSchedulerImpl(
         executorIdToRunningTaskIds(o.executorId) = HashSet[Long]()
         newExecAvail = true
       }
-      for (rack <- getRackForHost(o.host)) {
+      for (rack <- getRackForHostEnhanced(o.host)) {
         hostsByRack.getOrElseUpdate(rack, new HashSet[String]()) += o.host
       }
     }
 
     // Randomly shuffle offers to avoid always placing tasks on the same set of workers.
-    val shuffledOffers = Random.shuffle(offers)
+    // val shuffledOffers = Random.shuffle(offers)
+    val shuffledOffers = sortWorkerOffers(offers)
     // Build a list of tasks to assign to each worker.
     val tasks = shuffledOffers.map(o => new ArrayBuffer[TaskDescription](o.cores))
     val availableCpus = shuffledOffers.map(o => o.cores).toArray
@@ -407,6 +443,8 @@ private[spark] class TaskSchedulerImpl(
       accumUpdates.flatMap { case (id, updates) =>
         val accInfos = updates.map(acc => acc.toInfo(Some(acc.value), None))
         taskIdToTaskSetManager.get(id).map { taskSetMgr =>
+          // update task metrics especially task in progress
+          // taskSetMgr.updateTaskMetrics(id, TaskMetrics.fromAccumulatorInfos(accInfos))
           (id, taskSetMgr.stageId, taskSetMgr.taskSet.stageAttemptId, accInfos)
         }
       }
@@ -562,10 +600,13 @@ private[spark] class TaskSchedulerImpl(
     execs -= executorId
     if (execs.isEmpty) {
       hostToExecutors -= host
-      for (rack <- getRackForHost(host); hosts <- hostsByRack.get(rack)) {
+      for (rack <- getRackForHostEnhanced(host); hosts <- hostsByRack.get(rack)) {
         hosts -= host
         if (hosts.isEmpty) {
           hostsByRack -= rack
+          if (hostToRack.contains(host)) {
+            hostToRack -= host
+          }
         }
       }
     }
@@ -578,6 +619,18 @@ private[spark] class TaskSchedulerImpl(
 
   def executorAdded(execId: String, host: String) {
     dagScheduler.executorAdded(execId, host)
+  }
+
+  def getOrderForExecutor(executorId: String): Int = synchronized {
+    executorIdOrder.getOrElse(executorId, executorIdOrder.size / 2)
+  }
+
+  def hasSpeculatableTask(executorId: String): Boolean = synchronized {
+    executorIdSpeculatableTask.contains(executorId)
+  }
+
+  def getExecutorLength: Int = synchronized {
+    executorIdOrder.size
   }
 
   def getExecutorsAliveOnHost(host: String): Option[Set[String]] = synchronized {
@@ -602,6 +655,18 @@ private[spark] class TaskSchedulerImpl(
 
   // By default, rack is unknown
   def getRackForHost(value: String): Option[String] = None
+
+  // This function is used to check whether hostToRack has this host
+  // By doing so, we can avoid call getRackForHost
+  // Created by chenfei
+  def getRackForHostEnhanced (value: String): Option [String] = {
+    if (!hostToRack.contains(value)) {
+      for (rack <- getRackForHost(value)) {
+        hostToRack.put(value, rack)
+      }
+    }
+    hostToRack.get(value)
+  }
 
   private def waitBackendReady(): Unit = {
     if (backend.isReady) {

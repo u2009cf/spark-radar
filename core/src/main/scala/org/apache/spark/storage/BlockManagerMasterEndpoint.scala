@@ -52,6 +52,10 @@ class BlockManagerMasterEndpoint(
   // Mapping from block id to the set of block managers that have the block.
   private val blockLocations = new JHashMap[BlockId, mutable.HashSet[BlockManagerId]]
 
+  // Mapping from block id to the block size
+  // Added by chenfei
+  private val blockSizes = new mutable.HashMap[BlockId, Long]
+
   private val askThreadPool = ThreadUtils.newDaemonCachedThreadPool("block-manager-ask-thread-pool")
   private implicit val askExecutionContext = ExecutionContext.fromExecutorService(askThreadPool)
 
@@ -81,6 +85,9 @@ class BlockManagerMasterEndpoint(
 
     case GetLocationsMultipleBlockIds(blockIds) =>
       context.reply(getLocationsMultipleBlockIds(blockIds))
+
+    case GetSizesMultipleBlockIds(blockIds) =>
+      context.reply(getSizesMultipleBlockIds(blockIds))
 
     case GetPeers(blockManagerId) =>
       context.reply(getPeers(blockManagerId))
@@ -148,6 +155,7 @@ class BlockManagerMasterEndpoint(
       val bms: mutable.HashSet[BlockManagerId] = blockLocations.get(blockId)
       bms.foreach(bm => blockManagerInfo.get(bm).foreach(_.removeBlock(blockId)))
       blockLocations.remove(blockId)
+      blockSizes.remove(blockId)
     }
 
     // Ask the slaves to remove the RDD, and put the result in a sequence of Futures.
@@ -202,6 +210,7 @@ class BlockManagerMasterEndpoint(
       locations -= blockManagerId
       if (locations.size == 0) {
         blockLocations.remove(blockId)
+        blockSizes.remove(blockId)
       }
     }
     listenerBus.post(SparkListenerBlockManagerRemoved(System.currentTimeMillis(), blockManagerId))
@@ -378,6 +387,23 @@ class BlockManagerMasterEndpoint(
       blockLocations.put(blockId, locations)
     }
 
+    // Put the mapping (blockId, blockSize) to the HashMap blockSizes
+    // Added by chenfei
+    if (!blockSizes.contains(blockId)) {
+      var size: Long = -1L
+      if (storageLevel.isValid) {
+        if (storageLevel.useMemory) {
+          size = memSize
+        }
+        if(storageLevel.useDisk) {
+          size = diskSize
+        }
+      }
+      if(size != -1) {
+        blockSizes.put(blockId, size)
+      }
+    }
+
     if (storageLevel.isValid) {
       locations.add(blockManagerId)
     } else {
@@ -387,6 +413,7 @@ class BlockManagerMasterEndpoint(
     // Remove the block from master tracking if it has been removed on all slaves.
     if (locations.size == 0) {
       blockLocations.remove(blockId)
+      blockSizes.remove(blockId)
     }
     true
   }
@@ -395,9 +422,17 @@ class BlockManagerMasterEndpoint(
     if (blockLocations.containsKey(blockId)) blockLocations.get(blockId).toSeq else Seq.empty
   }
 
+  private def getSize(blockId: BlockId): Long = {
+    blockSizes.getOrElse(blockId, -1L)
+  }
+
   private def getLocationsMultipleBlockIds(
       blockIds: Array[BlockId]): IndexedSeq[Seq[BlockManagerId]] = {
     blockIds.map(blockId => getLocations(blockId))
+  }
+
+  private def getSizesMultipleBlockIds(blockIds: Array[BlockId]): IndexedSeq[Long] = {
+    blockIds.map(blockId => getSize(blockId))
   }
 
   /** Get the list of the peers of the given block manager */
@@ -429,6 +464,7 @@ class BlockManagerMasterEndpoint(
 
 @DeveloperApi
 case class BlockStatus(storageLevel: StorageLevel, memSize: Long, diskSize: Long) {
+  private val blockSize = memSize + diskSize
   def isCached: Boolean = memSize + diskSize > 0
 }
 

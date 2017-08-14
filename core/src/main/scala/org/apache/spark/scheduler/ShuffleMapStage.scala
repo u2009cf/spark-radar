@@ -47,6 +47,11 @@ private[spark] class ShuffleMapStage(
 
   private[this] var _numAvailableOutputs: Int = 0
 
+  /** Identify whether this stage is a shuffleMap stage.
+   * Added by chenfei
+   */
+  isShuffleMap = true
+
   /**
    * List of [[MapStatus]] for each partition. The index of the array is the map partition id,
    * and each value in the array is the list of possible [[MapStatus]] for a partition

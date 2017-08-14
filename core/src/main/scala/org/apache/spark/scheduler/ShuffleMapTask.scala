@@ -111,5 +111,9 @@ private[spark] class ShuffleMapTask(
 
   override def preferredLocations: Seq[TaskLocation] = preferredLocs
 
+  def setTaskSize(size: Long) {
+    taskSize = size
+  }
+
   override def toString: String = "ShuffleMapTask(%d, %d)".format(stageId, partitionId)
 }

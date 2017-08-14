@@ -138,6 +138,12 @@ private[spark] abstract class Task[T](
 
   def preferredLocations: Seq[TaskLocation] = Nil
 
+  // We use this variable to represent the taskSize
+  // Added by chenfei
+  protected var taskSize = -1L
+
+  def getTaskSize: Long = taskSize
+
   // Map output tracker epoch. Will be set by TaskScheduler.
   var epoch: Long = -1
 

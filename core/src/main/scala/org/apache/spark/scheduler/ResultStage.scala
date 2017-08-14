@@ -37,6 +37,11 @@ private[spark] class ResultStage(
     callSite: CallSite)
   extends Stage(id, rdd, partitions.length, parents, firstJobId, callSite) {
 
+  /** Identify whether this stage is a shuffleMap stage.
+   * Added by chenfei
+   */
+  isShuffleMap = false
+
   /**
    * The active job for this result stage. Will be empty if the job has already finished
    * (e.g., because the job was cancelled).

@@ -135,6 +135,12 @@ abstract class RDD[T: ClassTag](
    */
   protected def getPreferredLocations(split: Partition): Seq[String] = Nil
 
+  /**
+   * Optionally overridden by subclasses to specify partition size.
+   * Added by chenfei
+   */
+  protected def getPartitionSize(split: Partition): Long = -1L
+
   /** Optionally overridden by subclasses to specify how they are partitioned. */
   @transient val partitioner: Option[Partitioner] = None
 
@@ -272,6 +278,17 @@ abstract class RDD[T: ClassTag](
   final def preferredLocations(split: Partition): Seq[String] = {
     checkpointRDD.map(_.getPreferredLocations(split)).getOrElse {
       getPreferredLocations(split)
+    }
+  }
+
+  /**
+   * Get the partition size of a partition, we will view
+   * this value as the load of a task.
+   * Added by chenfei
+   */
+  final def partitionSize(split: Partition): Long = {
+    checkpointRDD.map(_.getPartitionSize(split)).getOrElse {
+      getPartitionSize(split)
     }
   }
 

@@ -170,6 +170,16 @@ class DAGScheduler(
    */
   private val cacheLocs = new HashMap[Int, IndexedSeq[Seq[TaskLocation]]]
 
+  /**
+   * Contains the size that each RDD's partitions are cached on. This map's keys are RDD ids
+   * and its values are arrays indexed by partition numbers. Each array value is the set of
+   * sizes where that RDD partition is cached.
+   *
+   * All accesses to this map should be guarded by synchronizing on it.
+   * Added by chenfei
+   */
+    private val cacheSize = new HashMap[Int, IndexedSeq[Long]]
+
   // For tracking failed nodes, we use the MapOutputTracker's epoch number, which is sent with
   // every task. When we detect a node failing, we note the current epoch number and failed
   // executor, increment it for new tasks, and use this to ignore stray ShuffleMapTask results.
@@ -256,6 +266,27 @@ class DAGScheduler(
    */
   def taskSetFailed(taskSet: TaskSet, reason: String, exception: Option[Throwable]): Unit = {
     eventProcessLoop.post(TaskSetFailed(taskSet, reason, exception))
+  }
+
+  /**
+   * This funciton is called to get the size of cached partition.
+   * Added by chenfei
+   */
+  private[scheduler]
+  def getCacheSize(rdd: RDD[_]): IndexedSeq[Long] = cacheSize.synchronized {
+    // Note: this doesn't use 'getOrElse()' because this method is called O(num tasks) times
+    if (!cacheSize.contains(rdd.id)) {
+      // Note: if the storage level is NONE, we don't need to get locations from block manager.
+      val size: IndexedSeq[Long] = if (rdd.getStorageLevel == StorageLevel.NONE) {
+        IndexedSeq.fill(rdd.partitions.length)(-1L)
+      } else {
+        val blockIds =
+          rdd.partitions.indices.map(index => RDDBlockId(rdd.id, index)).toArray[BlockId]
+        blockManagerMaster.getSizes(blockIds)
+      }
+      cacheSize(rdd.id) = size
+    }
+    cacheSize(rdd.id)
   }
 
   private[scheduler]
@@ -972,6 +1003,28 @@ class DAGScheduler(
         return
     }
 
+    // We add a metric for task in order to optimize scheduling decisions, i.e. task size
+    // We only consider the shuffleMap task now.
+    // Added by chenfei
+    val taskIdToTaskSize: Map[Int, Long] = try {
+      stage match {
+        case s: ShuffleMapStage =>
+          partitionsToCompute.map { id => (id, getPartitionSize(stage.rdd, id))}.toMap
+        case s: ResultStage =>
+          partitionsToCompute.map { id =>
+            val p = s.partitions(id)
+            (id, getPartitionSize(stage.rdd, p))
+          }.toMap
+      }
+    } catch {
+      case NonFatal(e) =>
+        stage.makeNewStageAttempt(partitionsToCompute.size)
+        listenerBus.post(SparkListenerStageSubmitted(stage.latestInfo, properties))
+        abortStage(stage, s"Task creation failed: $e\n${Utils.exceptionString(e)}", Some(e))
+        runningStages -= stage
+        return
+    }
+
     stage.makeNewStageAttempt(partitionsToCompute.size, taskIdToLocations.values.toSeq)
     listenerBus.post(SparkListenerStageSubmitted(stage.latestInfo, properties))
 
@@ -1013,10 +1066,13 @@ class DAGScheduler(
         case stage: ShuffleMapStage =>
           partitionsToCompute.map { id =>
             val locs = taskIdToLocations(id)
+            val size = taskIdToTaskSize(id)
             val part = stage.rdd.partitions(id)
-            new ShuffleMapTask(stage.id, stage.latestInfo.attemptId,
+            val smt = new ShuffleMapTask(stage.id, stage.latestInfo.attemptId,
               taskBinary, part, locs, stage.latestInfo.taskMetrics, properties, Option(jobId),
               Option(sc.applicationId), sc.applicationAttemptId)
+            smt.setTaskSize(size)
+            smt
           }
 
         case stage: ResultStage =>
@@ -1024,9 +1080,12 @@ class DAGScheduler(
             val p: Int = stage.partitions(id)
             val part = stage.rdd.partitions(p)
             val locs = taskIdToLocations(id)
-            new ResultTask(stage.id, stage.latestInfo.attemptId,
+            val size = taskIdToTaskSize(id)
+            val rt = new ResultTask(stage.id, stage.latestInfo.attemptId,
               taskBinary, part, locs, id, properties, stage.latestInfo.taskMetrics,
               Option(jobId), Option(sc.applicationId), sc.applicationAttemptId)
+            rt.setTaskSize(size)
+            rt
           }
       }
     } catch {
@@ -1523,6 +1582,54 @@ class DAGScheduler(
   private[spark]
   def getPreferredLocs(rdd: RDD[_], partition: Int): Seq[TaskLocation] = {
     getPreferredLocsInternal(rdd, partition, new HashSet)
+  }
+
+  /**
+   * Gets the partition size associated with a partition of a particular RDD
+   * This method is only called from DAGScheduler
+   * Added by chenfei
+   */
+  private[spark]
+  def getPartitionSize(rdd: RDD[_], partition: Int): Long = {
+    getPartitionSizeInternal(rdd, partition, new HashSet)
+  }
+
+  /**
+   * Recursive implementation for getPartitionSize.
+   * Added by chenfei
+   */
+  private def getPartitionSizeInternal(rdd: RDD[_],
+                                       partition: Int,
+                                       visited: HashSet[(RDD[_], Int)]): Long = {
+    // If the partition has already been visited, no need to re-visit.
+    if (!visited.add((rdd, partition))) {
+      // -1 has already been returned for previously visited partitions.
+      return -1
+    }
+    // If the partition is cached, return the cache locations
+    val cached = getCacheSize(rdd)(partition)
+    if (cached != -1L) {
+      return cached
+    }
+    // As is the case for input RDDs, we get those partitions' size
+    val rddSizes = rdd.partitionSize(rdd.partitions(partition))
+    if (rddSizes != -1L) {
+      return rddSizes
+    }
+
+    // If the RDD has narrow dependencies, pick the first partition of the first narrow dependency
+    // that has partition size.
+    rdd.dependencies.foreach {
+      case n: NarrowDependency[_] =>
+        for (inPart <- n.getParents(partition)) {
+          val size = getPartitionSizeInternal(n.rdd, inPart, visited)
+          if (size != -1L) {
+            return size
+          }
+        }
+      case _ =>
+    }
+    -1L
   }
 
   /**
